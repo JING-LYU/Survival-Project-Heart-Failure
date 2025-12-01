@@ -1,0 +1,237 @@
+---
+title: "analysis survival cox model and logrank"
+author: "Zhengkun Ou"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(survival)
+library(survminer)
+library(dplyr)
+```
+
+
+
+```{r}
+hf <- read.csv("heart_failure_clinical_records_dataset.csv")
+str(hf)
+table(hf$DEATH_EVENT)
+```
+We can see that there are 96 deaths in the dataset and 203 survivals.
+
+```{r}
+summary(hf$time)
+```
+
+
+```{r}
+surv_obj <- with(hf, Surv(time = time, event = DEATH_EVENT))
+```
+
+
+
+```{r}
+fit_overall <- survfit(surv_obj ~ 1, data = hf)
+
+ggsurvplot(
+  fit_overall,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  xlab = "Follow-up time (days)",
+  ylab = "Survival probability",
+  title = "Overall Kaplan - Meier Survival Curve",
+  surv.median.line = "hv"
+)
+```
+KM curves by a categorical covariate
+
+Pick a clinically relevant binary covariate, e.g. high_blood_pressure:
+
+```{r high blood pressure}
+hf$high_bp_factor <- factor(hf$high_blood_pressure, labels = c("No HBP", "HBP"))
+
+fit_bp <- survfit(surv_obj ~ high_bp_factor, data = hf)
+
+ggsurvplot(
+  fit_bp,
+  data = hf,
+  conf.int = TRUE,
+  pval = TRUE,          # log-rank p-value by default
+  risk.table = TRUE,
+  legend.title = "High blood pressure",
+  legend.labs = c("No", "Yes"),
+  xlab = "Follow-up time (days)",
+  ylab = "Survival probability",
+  title = "KM Curves by High Blood Pressure Status"
+)
+```
+
+We can see that the KM curve shows an significant difference in surval probability when we make comparison between patients with high blood pressure and no high blood pressure. We compared survival between patients with and without high blood pressure using a log-rank test, which is appropriate for comparing two Kaplan–Meier curves under approximately proportional hazards. The test indicated a statistically significant difference in survival (p = 0.036).
+
+
+```{r KM by sex }
+hf$sex_factor <- factor(hf$sex, labels = c("Female", "Male"))
+fit_sex <- survfit(surv_obj ~ sex_factor, data = hf)
+ggsurvplot(
+  fit_sex,
+  data = hf,
+  conf.int = TRUE,
+  pval = TRUE,          # log-rank p-value by default
+  risk.table = TRUE,
+  legend.title = "SEX",
+  legend.labs = c("Female", "Male"),
+  xlab = "Follow-up time (days)",
+  ylab = "Survival probability",
+  title = "KM Curves by SEX"
+)
+```
+
+```{r KM by smoking}
+hf$smoking_factor <- factor(hf$smoking, labels = c("Non-Smoker", "Smoker"))
+fit_smoking <- survfit(surv_obj ~ smoking_factor, data = hf)
+
+ggsurvplot(
+  fit_smoking,
+  data = hf,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  pval = TRUE,         # shows log-rank p-value
+  xlab = "Follow-up time (days)",
+  ylab = "Survival probability",
+  title = "Survival by Smoking Status",
+  legend.title = "Smoking",
+  legend.labs = c("Non-Smoker", "Smoker")
+)
+```
+
+```{r diabetes}
+surv_obj <- with(hf, Surv(time, DEATH_EVENT))
+
+hf$diabetes_factor <- factor(hf$diabetes, labels = c("No Diabetes", "Diabetes"))
+
+fit_diabetes <- survfit(surv_obj ~ diabetes_factor, data = hf)
+
+ggsurvplot(
+  fit_diabetes,
+  data = hf,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  pval = TRUE,                    # log-rank p-value
+  xlab = "Follow-up time (days)",
+  ylab = "Survival probability",
+  title = "KM Curves by Diabetes Status",
+  legend.title = "Diabetes",
+  legend.labs = c("No", "Yes"),
+  palette = c("#E69F00", "#56B4E9")
+)
+```
+
+
+Use log-rank test for each binary predictor:
+```{r logrank test}
+predictors <- c("diabetes", "high_blood_pressure", "smoking",
+                "anaemia", "sex")
+for (v in predictors) {
+  print(survdiff(surv_obj ~ hf[[v]], data = hf))
+}
+```
+
+
+
+```{r}
+uni_results <- lapply(predictors, function(v) {
+  summary(coxph(surv_obj ~ hf[[v]], data = hf))
+})
+
+```
+
+```{r}
+data.frame(
+  variable = predictors,
+  HR = sapply(uni_results, \(x) exp(x$coef)),
+  p = sapply(uni_results, \(x) x$wald["pvalue"])
+)
+```
+
+
+
+```{r peto-peto}
+# Peto–Peto / Prentice, approx via rho = 1
+pp_test <- survdiff(surv_obj ~ high_bp_factor, data = hf, rho = 1)
+pp_test
+
+pp_chisq <- pp_test$chisq
+pp_p <- pchisq(pp_chisq, df = length(pp_test$n) - 1, lower.tail = FALSE)
+pp_p
+
+```
+
+The Peto–Peto / Prentice test also indicates a significant difference in survival between patients with and without high blood pressure (p = 0.030).
+
+
+Next, we will fit a Cox proportional hazards model to assess the effect of multiple covariates on survival.
+
+```{r cox model}
+cox_multi <- coxph(
+  surv_obj ~ age + sex + ejection_fraction +
+    serum_creatinine + high_blood_pressure + diabetes + smoking,
+  data = hf
+)
+summary(cox_multi)
+```
+
+From the published study
+Reference:
+
+Chicco, D., Jurman, G. Machine learning can predict survival of patients with heart failure from serum creatinine and ejection fraction alone. BMC Med Inform Decis Mak 20, 16 (2020). 
+
+the main important predictors are:
+Age
+
+Ejection fraction
+
+Serum creatinine
+
+High blood pressure
+
+Diabetes
+
+Smoking
+
+Sex
+
+
+Intrepretation of the study:
+
+
+
+Model comparison:
+```{r Comparing Cox models}
+cox_simple <- coxph(surv_obj ~ age + ejection_fraction, data = hf)
+
+anova(cox_simple, cox_multi, test = "LRT")
+
+extractAIC(cox_simple)
+extractAIC(cox_multi)
+```
+
+The likelihood ratio test comparing the simple and multiple Cox models indicates that the multiple Cox model provides a significantly better fit to the data (p < 0.001). Additionally, the AIC values suggest that the multiple Cox model has a lower AIC (better model fit) compared to the simple model.
+
+```{r check for multicollinearity}
+car::vif(cox_multi)
+```
+The variance inflation factors (VIFs) for all covariates in the multiple Cox model are below 5, indicating that multicolinearity is not a concern in this model.
+
+Present adjusted survival curves:
+```{r}
+fit_adj <- survfit(cox_multi)
+ggsurvplot(fit_adj, data = hf)
+```
+
+
