@@ -1,0 +1,415 @@
+---
+title: "Survival Analysis Final Project – PH Assumption & Interaction Effects"
+author: "Xuange Liang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+library(dplyr)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(gtsummary)
+library(tidyr)
+```
+
+# Introduction
+
+This code focuses on two steps in Cox modelling:
+
+1. **Proportional Hazards (PH) Assumption Testing**: Verifying that the hazard ratio between groups remains constant over time.
+2. **Interaction Effects Exploration**: Investigating whether the effect of one predictor depends on the level of another predictor
+
+# Data Preparation
+
+```{r load-data}
+# Load the heart failure dataset
+heart <- read.csv("heart_failure_clinical_records_dataset.csv")
+
+# Quick structure check
+str(heart)
+
+# Create factor versions for categorical variables
+heart <- heart %>%
+  mutate(
+    sex_factor = factor(sex, levels = c(0, 1), labels = c("Female", "Male")),
+    anaemia_factor = factor(anaemia, levels = c(0, 1), labels = c("No", "Yes")),
+    diabetes_factor = factor(diabetes, levels = c(0, 1), labels = c("No", "Yes")),
+    high_bp_factor = factor(high_blood_pressure, levels = c(0, 1), labels = c("No", "Yes")),
+    smoking_factor = factor(smoking, levels = c(0, 1), labels = c("No", "Yes")),
+    # Create grouped variables for visualization
+    age_group = cut(age, breaks = c(0, 60, 70, Inf), labels = c("<60", "60-70", ">70")),
+    ef_group = cut(ejection_fraction, breaks = c(0, 30, 45, Inf), labels = c("≤30%", "30-45%", ">45%"))
+  )
+
+# Create survival object
+surv_obj <- Surv(time = heart$time, event = heart$DEATH_EVENT)
+```
+
+# Part 1: Proportional Hazards Assumption Testing
+
+The Cox proportional hazards model assumes that the hazard ratio between any two individuals is constant over time (i.e., the survival curves for different groups should not cross). Violations of this assumption may lead to biased estimates and incorrect inferences.
+
+## Fit the Full Cox Model
+
+We first fit the full multivariable Cox model as specified in `analysis_1.Rmd`.
+
+```{r cox-full-model}
+cox_full <- coxph(
+  surv_obj ~ age + sex + ejection_fraction + serum_creatinine + 
+    high_blood_pressure + diabetes + smoking,
+  data = heart
+)
+
+summary(cox_full)
+```
+
+## Schoenfeld Residuals Test
+
+The most common approach to test the PH assumption is the **Schoenfeld residuals test** (`cox.zph()`). This test evaluates whether the Schoenfeld residuals show a systematic trend with time. A significant p-value (< 0.05) suggests a violation of the PH assumption for that covariate.
+
+```{r schoenfeld-test}
+ph_test <- cox.zph(cox_full)
+
+# Print the test results
+print(ph_test)
+```
+
+### Interpretation of Schoenfeld Test Results
+
+```{r ph-summary-table}
+# Create a summary table of PH test results
+ph_results <- data.frame(
+  Variable = rownames(ph_test$table),
+  Chisq = round(ph_test$table[, "chisq"], 3),
+  df = ph_test$table[, "df"],
+  p_value = round(ph_test$table[, "p"], 4)
+) %>%
+  mutate(
+    PH_Assumption = ifelse(p_value < 0.05, "Violated", "Satisfied")
+  )
+
+knitr::kable(
+  ph_results,
+  caption = "Schoenfeld Residuals Test for Proportional Hazards Assumption",
+  col.names = c("Variable", "Chi-square", "df", "p-value", "PH Assumption")
+)
+```
+
+**Key Finding**: The Schoenfeld test reveals that **ejection fraction** marginally violates the PH assumption (p = 0.039), while all other covariates satisfy the assumption. The global test (p = 0.387) suggests the overall model adequacy is acceptable.
+
+## Schoenfeld Residuals Plots
+
+Visual inspection of the Schoenfeld residuals over time can provide additional insight into potential violations. If the PH assumption holds, the residuals should show no systematic trend (the smoothed line should be approximately horizontal).
+
+```{r schoenfeld-plots, fig.height=10, fig.width=10}
+# Plot Schoenfeld residuals for all variables
+par(mfrow = c(3, 3))
+plot(ph_test)
+```
+
+```{r schoenfeld-ef-plot, fig.height=6, fig.width=8}
+# Focus on ejection fraction (the variable with PH violation)
+ggcoxzph(ph_test, var = "ejection_fraction", font.main = 12)
+```
+
+The plot for ejection fraction shows a slight upward trend in the residuals over time, indicating that the effect of EF on hazard may decrease (become less protective) as time progresses.
+
+## Log-Log Survival Plots
+
+An alternative graphical method is the **log-log survival plot**. If the PH assumption holds, the log-log survival curves for different groups should be approximately parallel.
+
+### Log-Log Plot by Ejection Fraction Groups
+
+```{r loglog-ef, fig.height=5, fig.width=7}
+fit_ef <- survfit(surv_obj ~ ef_group, data = heart)
+
+ggsurvplot(
+  fit_ef,
+  data = heart,
+  fun = "cloglog",
+  xlab = "Time (log scale)",
+  ylab = "log(-log(S(t)))",
+  title = "Log-Log Plot by Ejection Fraction Group",
+  legend.title = "EF Group",
+  ggtheme = theme_minimal()
+)
+```
+
+The log-log plot shows that the curves for different EF groups are not perfectly parallel, particularly at later time points, which corroborates the Schoenfeld test finding.
+
+## Handling the EF Violation: Stratified Cox Model
+
+Since ejection fraction violates the PH assumption, we fit a **stratified Cox model** that allows different baseline hazards for each EF group while estimating common effects for other covariates.
+
+```{r stratified-model-ef}
+# Stratify by ejection fraction group
+cox_stratified_ef <- coxph(
+  surv_obj ~ age + sex + serum_creatinine + 
+    high_blood_pressure + diabetes + smoking + strata(ef_group),
+  data = heart
+)
+
+summary(cox_stratified_ef)
+```
+
+In the stratified model, we no longer estimate a hazard ratio for ejection fraction directly, but instead allow the baseline hazard to vary across EF groups. This approach addresses the PH violation while still estimating effects of other predictors.
+
+# Part 2: Interaction Effects Exploration
+
+Interaction effects occur when the effect of one predictor on survival depends on the level of another predictor. We test several clinically meaningful interactions.
+
+## Baseline Model (No Interaction)
+
+```{r baseline-model}
+cox_no_interaction <- coxph(
+  surv_obj ~ age + ejection_fraction + sex + serum_creatinine + 
+    high_blood_pressure + diabetes + smoking,
+  data = heart
+)
+```
+
+## Age × Ejection Fraction Interaction
+
+We hypothesize that the protective effect of higher ejection fraction may differ across age groups. For instance, older patients with low EF might have particularly poor survival.
+
+### Fit Model with Interaction
+
+```{r interaction-age-ef}
+cox_interaction_age_ef <- coxph(
+  surv_obj ~ age * ejection_fraction + sex + serum_creatinine + 
+    high_blood_pressure + diabetes + smoking,
+  data = heart
+)
+
+summary(cox_interaction_age_ef)
+```
+
+### Likelihood Ratio Test for Interaction
+
+```{r interaction-age-ef-test}
+# Compare models using likelihood ratio test
+lrt_age_ef <- anova(cox_no_interaction, cox_interaction_age_ef, test = "LRT")
+print(lrt_age_ef)
+```
+
+**Result**: The Age × Ejection Fraction interaction is **statistically significant** (p = 0.015), indicating that the effect of ejection fraction on survival depends on patient age.
+
+### Visualization of Age × EF Interaction
+
+```{r viz-age-ef-interaction, fig.height=6, fig.width=8}
+# KM curves stratified by both age and EF
+fit_age_ef <- survfit(surv_obj ~ age_group + ef_group, data = heart)
+
+ggsurvplot(
+  fit_age_ef,
+  data = heart,
+  pval = TRUE,
+  risk.table = FALSE,
+  legend.title = "Age × EF",
+  xlab = "Follow-up time (days)",
+  ylab = "Survival probability",
+  title = "Kaplan-Meier Curves by Age Group and Ejection Fraction",
+  ggtheme = theme_minimal()
+)
+```
+
+```{r viz-age-ef-facet, fig.height=6, fig.width=10}
+# Faceted KM curves
+ggsurvplot_facet(
+  survfit(Surv(time, DEATH_EVENT) ~ ef_group, data = heart),
+  data = heart,
+  facet.by = "age_group",
+  pval = TRUE,
+  legend.title = "EF Group",
+  xlab = "Follow-up time (days)",
+  ylab = "Survival probability",
+  title = "Survival by EF Group, Faceted by Age Group"
+)
+```
+
+**Clinical Interpretation**: The visualization shows that:
+
+- In younger patients (<60), survival differences between EF groups are less pronounced.
+- In older patients (>70), low EF (≤30%) is associated with dramatically worse survival.
+- The protective effect of higher EF is more pronounced in older patients.
+
+## Summary of Interaction Tests
+
+We also tested other potential interactions (Age × Serum Creatinine, EF × Serum Creatinine, Sex × Smoking), but none were statistically significant:
+
+```{r interaction-summary}
+# Test other interactions
+cox_interaction_age_creat <- coxph(
+  surv_obj ~ age * serum_creatinine + sex + ejection_fraction + 
+    high_blood_pressure + diabetes + smoking,
+  data = heart
+)
+
+cox_interaction_ef_creat <- coxph(
+  surv_obj ~ ejection_fraction * serum_creatinine + age + sex + 
+    high_blood_pressure + diabetes + smoking,
+  data = heart
+)
+
+cox_no_smoking_int <- coxph(
+  surv_obj ~ sex + smoking + age + ejection_fraction + serum_creatinine + 
+    high_blood_pressure + diabetes,
+  data = heart
+)
+
+cox_interaction_sex_smoking <- coxph(
+  surv_obj ~ sex * smoking + age + ejection_fraction + serum_creatinine + 
+    high_blood_pressure + diabetes,
+  data = heart
+)
+
+# Compile results
+interaction_summary <- data.frame(
+  Interaction = c("Age × Ejection Fraction", 
+                  "Age × Serum Creatinine", 
+                  "EF × Serum Creatinine",
+                  "Sex × Smoking"),
+  LRT_Chisq = c(
+    anova(cox_no_interaction, cox_interaction_age_ef)$Chisq[2],
+    anova(cox_no_interaction, cox_interaction_age_creat)$Chisq[2],
+    anova(cox_no_interaction, cox_interaction_ef_creat)$Chisq[2],
+    anova(cox_no_smoking_int, cox_interaction_sex_smoking)$Chisq[2]
+  ),
+  p_value = c(
+    anova(cox_no_interaction, cox_interaction_age_ef)$`Pr(>|Chi|)`[2],
+    anova(cox_no_interaction, cox_interaction_age_creat)$`Pr(>|Chi|)`[2],
+    anova(cox_no_interaction, cox_interaction_ef_creat)$`Pr(>|Chi|)`[2],
+    anova(cox_no_smoking_int, cox_interaction_sex_smoking)$`Pr(>|Chi|)`[2]
+  )
+) %>%
+  mutate(
+    LRT_Chisq = round(LRT_Chisq, 3),
+    p_value = round(p_value, 4),
+    Significant = ifelse(p_value < 0.05, "Yes", "No")
+  )
+
+knitr::kable(
+  interaction_summary,
+  caption = "Summary of Interaction Effect Tests",
+  col.names = c("Interaction Term", "LRT Chi-square", "p-value", "Significant (α=0.05)")
+)
+```
+
+# Final Model Selection
+
+Based on the diagnostic analyses:
+
+1. **Ejection fraction** violates the PH assumption (p = 0.039)
+2. **Age × EF interaction** is statistically significant (p = 0.015)
+
+Therefore, we consider two alternative final models:
+
+## Option 1: Model with Age × EF Interaction
+
+This model accounts for the significant interaction and implicitly addresses the non-proportionality of EF by allowing its effect to vary with age.
+
+```{r final-model-interaction}
+cox_final_interaction <- coxph(
+  surv_obj ~ age * ejection_fraction + sex + serum_creatinine + 
+    high_blood_pressure + diabetes + smoking,
+  data = heart
+)
+
+summary(cox_final_interaction)
+```
+
+```{r final-model-interaction-table}
+tbl_regression(
+  cox_final_interaction,
+  exponentiate = TRUE,
+  label = list(
+    age ~ "Age (years)",
+    ejection_fraction ~ "Ejection Fraction (%)",
+    sex ~ "Sex (Male)",
+    serum_creatinine ~ "Serum Creatinine (mg/dL)",
+    high_blood_pressure ~ "High Blood Pressure",
+    diabetes ~ "Diabetes",
+    smoking ~ "Smoking",
+    `age:ejection_fraction` ~ "Age × EF Interaction"
+  )
+) %>%
+  bold_p() %>%
+  bold_labels()
+```
+
+## Option 2: Stratified Model by EF Group
+
+This model stratifies by EF group to handle the PH violation directly.
+
+```{r final-model-stratified}
+tbl_regression(
+  cox_stratified_ef,
+  exponentiate = TRUE,
+  label = list(
+    age ~ "Age (years)",
+    sex ~ "Sex (Male)",
+    serum_creatinine ~ "Serum Creatinine (mg/dL)",
+    high_blood_pressure ~ "High Blood Pressure",
+    diabetes ~ "Diabetes",
+    smoking ~ "Smoking"
+  )
+) %>%
+  bold_p() %>%
+  bold_labels()
+```
+
+## Model Comparison
+
+```{r model-comparison}
+# Compare AIC
+model_comparison <- data.frame(
+  Model = c("Base Model (No Interaction)", 
+            "Model with Age × EF Interaction",
+            "Stratified by EF Group"),
+  AIC = c(
+    AIC(cox_no_interaction),
+    AIC(cox_final_interaction),
+    AIC(cox_stratified_ef)
+  ),
+  Concordance = c(
+    summary(cox_no_interaction)$concordance[1],
+    summary(cox_final_interaction)$concordance[1],
+    summary(cox_stratified_ef)$concordance[1]
+  )
+) %>%
+  mutate(
+    AIC = round(AIC, 2),
+    Concordance = round(Concordance, 3)
+  )
+
+knitr::kable(
+  model_comparison,
+  caption = "Model Comparison: AIC and Concordance Index",
+  col.names = c("Model", "AIC", "C-index")
+)
+```
+
+## Recommended Final Model
+
+Based on the analyses, we recommend the **Model with Age × EF Interaction** as the final model because:
+
+1. It accounts for the statistically significant interaction between age and ejection fraction
+2. The interaction term provides clinically meaningful insights about subgroup-specific risk
+3. It addresses the non-proportionality of EF indirectly by allowing its effect to vary with age
+
+
+```{r session-info}
+sessionInfo()
+```
