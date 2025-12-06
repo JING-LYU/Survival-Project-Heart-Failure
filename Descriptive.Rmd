@@ -3,6 +3,9 @@ title: "Survival Analysis Final Project – Exploratory Data Analysis"
 author: "Jing Lyu"
 date: "`r Sys.Date()`"
 output:
+  github_document:
+    toc: true
+    toc_depth: 3
   html_document:
     toc: true
     toc_depth: 3
